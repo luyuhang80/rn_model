@@ -33,19 +33,55 @@ class Model(MLNet):
         self.max_rgcn_nodes = max_rgcn_nodes
 
     def build_modal_1(self):
+        # M_text = 4412
+
+        # ph_text = tf.placeholder(tf.float32, [self.batch_size, M_text], 'input_text')
+
+        # with tf.variable_scope('fc_1'):
+        #     fc_1, regularizers = self.fc(ph_text, self.desc_dims, activation_fn=tf.nn.relu, regularize=False)
+        #     self.regularizers += regularizers
+
+        # with tf.variable_scope('fc_2'):
+        #     fc_2, regularizers = self.fc(fc_1, self.desc_dims, activation_fn=tf.nn.relu, regularize=False)
+        #     self.regularizers += regularizers
+
+        # return [ph_text], fc_1
+        adjmat_path = '/data1/yjgroup/yzq/data/cmplaces/graph_knn_digit.txt'
+        n_gconv_layers = 2
         M_text = 4412
-
+        # F_text = 1
         ph_text = tf.placeholder(tf.float32, [self.batch_size, M_text], 'input_text')
+        A = graph.load_adjmat(adjmat_path, M_text)
+        A_sparse = sparse.csr_matrix(A).astype(np.float32)
+        As = [A_sparse] * n_gconv_layers
+        laplacians = [graph.laplacian(A, normalized=True) for A in As]
 
-        with tf.variable_scope('fc_1'):
-            fc_1, regularizers = self.fc(ph_text, self.desc_dims, activation_fn=tf.nn.relu, regularize=False)
-            self.regularizers += regularizers
+        # specify GCN parameters
+        specs = gcn_specs()
+        specs.n_gconv_layers = n_gconv_layers
+        specs.laplacians = laplacians
+        specs.n_gconv_filters = [1, 1]
+        specs.polynomial_orders = [3, 3]
+        specs.pooling_sizes = [1, 1]
+        specs.fc_dims = []
+        specs.bias_type = 'per_node_per_filter'
+        specs.pool_fn = tf.nn.max_pool
+        specs.activation_fn = tf.nn.relu
+        specs.batch_norm = False
+        specs.regularize = False
 
-        with tf.variable_scope('fc_2'):
-            fc_2, regularizers = self.fc(fc_1, self.desc_dims, activation_fn=tf.nn.relu, regularize=False)
-            self.regularizers += regularizers
+        ph_gcn = tf.expand_dims(ph_text,2)
+        # build GCN
+        self.gcn = GCN(specs, is_training=self.is_training)
+        gcn_out, regularizers = self.gcn.build(ph_gcn, self.ph_dropout)
+        self.regularizers += regularizers
 
-        return [ph_text], fc_2
+        with tf.variable_scope('gcn_fc'):
+            gcn_fc, regularizers_gcn_fc = self.fc(gcn_out, self.desc_dims, activation_fn=tf.nn.relu)
+            self.regularizers += regularizers_gcn_fc
+
+        return [ph_text], gcn_fc
+
 
     def build_modal_2(self):
         B = self.batch_size
@@ -54,21 +90,19 @@ class Model(MLNet):
         F_r = 128
         dropout_ratio = 0.5
         ph_x = tf.placeholder(tf.float32, [B, N, F_in], name='image_feature')
-        x_in = tf.layers.batch_normalization(ph_x, center=False)
 
         ph_R = tf.placeholder(tf.float32, [B, N, N, F_r], name='relation_feature')
-        R_in = tf.layers.batch_normalization(ph_R, center=False)
 
         ph_A = tf.placeholder(tf.int32, [B, N, N], name='adj_mat')
 
-        subsapce_dim = 384
+        subsapce_dim = 256
         relation_glimpse = 1  # output dimension of RNs
 
         # Image matrix translation X
         # ph_image = tf.placeholder(tf.float32, [self.batch_size, N, input_dim], 'input_image')
-        print('ph_x',ph_x.get_shape())
+        # print('ph_x',ph_x.get_shape())
         ph_reshape = tf.reshape(ph_x, [int(B * N), F_in])
-        ph_subdim, sm_reg = self.fc(ph_reshape, subsapce_dim, activation_fn=None)
+        ph_subdim, sm_reg = self.fc(ph_reshape, subsapce_dim, activation_fn=tf.nn.relu)
         self.regularizers += sm_reg
         ph_subdim = tf.reshape(ph_subdim, [int(B), int(N), int(subsapce_dim)])
 
@@ -78,9 +112,9 @@ class Model(MLNet):
         ph_exp2 = tf.tile(ph_exp2, [1, 1, N, 1])
         ph_input = ph_exp1 * ph_exp2  # [bs,N,N, ph_subdim]
 
-        X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=int(subsapce_dim/2),kernel_size=1)),dropout_ratio)
-        X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X0,filters=int(subsapce_dim/4),kernel_size=1)),dropout_ratio)
-        X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X0,filters=relation_glimpse,kernel_size=1)), dropout_ratio)
+        #X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=int(subsapce_dim/2),kernel_size=1)),dropout_ratio)
+        #X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X0,filters=int(subsapce_dim/4),kernel_size=1)),dropout_ratio)
+        X0 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=relation_glimpse,kernel_size=1)), dropout_ratio)
         rel_map0 = X0 + tf.transpose(X0,[0,2,1,3])
         # print('rel_map0_bt',rel_map0.get_shape())
         rel_map0 = tf.transpose(rel_map0,[0,3,2,1])
@@ -90,24 +124,18 @@ class Model(MLNet):
         # print('rel_map0_shape1',rel_map0.get_shape())
         rel_map0 = tf.nn.softmax(rel_map0,axis=2)
         rel_map0 = tf.reshape(rel_map0,[self.batch_size,relation_glimpse,N,-1])
-        print('rel_map0',rel_map0.get_shape())
+        # print('rel_map0',rel_map0.get_shape())
 
-        # X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=int(subsapce_dim/2),kernel_size=1,dilation_rate=(1,1),padding='valid')),dropout_ratio)
-        # X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X1,filters=int(subsapce_dim/4),kernel_size=1,dilation_rate=(1,2),padding='valid')),dropout_ratio)
-        # X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X1,filters=relation_glimpse,kernel_size=1,dilation_rate=(1,4),padding='valid')),dropout_ratio)
-        
-        X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=int(subsapce_dim/2),kernel_size=3,dilation_rate=(1,1),padding='same')),dropout_ratio)
-        X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X1,filters=int(subsapce_dim/4),kernel_size=3,dilation_rate=(1,2),padding='same')),dropout_ratio)
-        X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X1,filters=relation_glimpse,kernel_size=3,dilation_rate=(1,4),padding='same')),dropout_ratio)
-        
+        #X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=int(subsapce_dim/2),kernel_size=1,dilation_rate=(1,1),padding='valid')),dropout_ratio)
+        #X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=X1,filters=int(subsapce_dim/4),kernel_size=1,dilation_rate=(1,2),padding='valid')),dropout_ratio)
+        X1 = tf.nn.dropout(tf.nn.relu(tf.layers.conv2d(inputs=ph_input,filters=relation_glimpse,kernel_size=3,dilation_rate=(1,4),padding='same')),dropout_ratio)
         rel_map1 = X1 + tf.transpose(X1,[0,2,1,3])
         rel_map1 = tf.transpose(rel_map1,[0,3,2,1])
         rel_map1 = tf.reshape(rel_map1,[self.batch_size,relation_glimpse,-1])
         rel_map1 = tf.nn.softmax(rel_map1,2)
         rel_map1 = tf.reshape(rel_map1,[self.batch_size,relation_glimpse,N,-1])
-        
-        print('rel_map1',rel_map1.get_shape())
-        print('ph_x',ph_x.get_shape())
+        # print('rel_map1',rel_map1.get_shape())
+        # print('ph_x',ph_x.get_shape())
 
         rel_x = tf.zeros_like(ph_x)
         for g in range(relation_glimpse):
@@ -119,7 +147,7 @@ class Model(MLNet):
         fc_out = tf.squeeze(tf.reduce_sum(ph_x,1))
 
         with tf.variable_scope('rn_fc_2'):
-            rn_out_2, regularizers = self.fc(rn_out, self.desc_dims, activation_fn=tf.nn.relu, regularize=True)
+            rel_x, regularizers = self.fc(rn_out, self.desc_dims, activation_fn=tf.nn.relu)
             self.regularizers += regularizers
 
         # +================================================================================================
@@ -144,4 +172,4 @@ class Model(MLNet):
         #     rgcn_out, regs = rgcn.rgconv_i_att(0, rgconv2, R_in, 512, dropout=keep_prob, regularize=False)
         # self.regularizers += regs
 
-        return [ph_x, ph_R, ph_A], rn_out_2
+        return [ph_x, ph_R, ph_A], rel_x

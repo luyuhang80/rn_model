@@ -1,6 +1,8 @@
 # -*- coding:utf-8 -*-
 import lib.mlnet
+import lib.nn
 import tensorflow as tf
+import numpy as np
 
 class MLNet(lib.mlnet.MLNet):
     """
@@ -18,10 +20,6 @@ class MLNet(lib.mlnet.MLNet):
         self.ph_dropout = tf.placeholder(tf.float32, [], 'dropout')
         self.ph_labels = tf.placeholder(tf.int32, [self.batch_size], 'labels')
 
-        if self.is_retrieving:
-            self.ph_desc_1 = tf.placeholder(tf.float32, [self.batch_size, self.desc_dims], 'desc_1')
-            self.ph_desc_2 = tf.placeholder(tf.float32, [self.batch_size, self.desc_dims], 'desc_2')
-
         with tf.variable_scope('modal_1'), tf.device(modal_1_device):
             self.ph1, self.modal_1 = self.build_modal_1()
             _, F_m1 = self.modal_1.get_shape()
@@ -29,12 +27,22 @@ class MLNet(lib.mlnet.MLNet):
 
         with tf.variable_scope('modal_2'), tf.device(modal_2_device):
             self.ph2, self.modal_2 = self.build_modal_2()
-            _, F_m2 = self.modal_2.get_shape()
-            self.descriptors_2 = self.BilinearAttentionLayer(self.modal_1,self.modal_2)
-            # self.descriptors_2 = self.modal_2
+            #_, k, F_m2 = self.modal_2.get_shape()
+            self.descriptors_2 = self.modal_2
+            desc_shape_2 = self.descriptors_2.get_shape()
+
+        if self.is_retrieving:
+            self.ph_desc_1 = tf.placeholder(tf.float32, [self.batch_size, self.desc_dims], 'desc_1')
+            self.ph_desc_2 = tf.placeholder(tf.float32, desc_shape_2, 'desc_2')
 
         desc_1 = self.ph_desc_1 if self.is_retrieving else self.descriptors_1
         desc_2 = self.ph_desc_2 if self.is_retrieving else self.descriptors_2
+
+        # with tf.variable_scope('bi_attention'):
+        #     desc_2 = self.BilinearAttentionLayer(desc_1,desc_2)
+        #     desc_2 = tf.reshape(desc_2,[self.batch_size,-1])
+        #     desc_2, regularizers = self.fc(desc_2, self.desc_dims, activation_fn=tf.nn.relu, regularize=False)
+        #     self.regularizers += regularizers
 
         with tf.device(metrics_device):
             with tf.variable_scope('metrics'):
@@ -49,14 +57,42 @@ class MLNet(lib.mlnet.MLNet):
         self.build_saver()
         
     def BilinearAttentionLayer(self,q,v):
-        num_hid = 512
-        self.h_mat = self.add_weight(name='h_mat',shape=([1,1,self.num_hid]),initializer='normal',trainable=True)
-        self.h_bias = self.add_weight(name='h_bias',shape=([1,1,1]),initializer='normal',trainable=True)
-        v_proj = self.fc(v,num_hid,activation_fn='relu')
-        q_proj = tf.tranpose(tf.expand_dims(tf.nn.dropout(self.fc(q,num_hid,activation_fn='relu'),self.ph_dropout),1),[0,2,1])
-        v_proj = (v_proj * self.h_mat)
-        logits = tf.matmul(v_proj, q_proj) + self.h_bias #[batch, k, 1]
-        return v * logits
+        with tf.variable_scope('bi_attention_'):
+            num_hid = 4096
+            bz, k, hid = v.get_shape()
+
+            # ------ old ----------------
+            # init_range = np.sqrt(6.0 / (num_hid + 1 + 1))
+            # init_w = tf.random_uniform_initializer(minval=-init_range, maxval=init_range)
+            # init_b = tf.constant_initializer(0.0)
+            # self.h_mat = tf.get_variable(name='h_mat',shape=([1,1,num_hid]),dtype=tf.float32,initializer=init_w,trainable=True)
+            # self.h_bias = tf.get_variable(name='h_bias',shape=([1,1,1]),dtype=tf.float32,initializer=init_b,trainable=True)
+            # ------- ned ---------------
+            self.h_mat = self.weight_variable(name='h_mat',shape=([1,1,num_hid]),regularize=True)
+            self.h_bias = self.weight_variable(name='h_bias',shape=([1,1,1]),regularize=True)
+
+            with tf.variable_scope('v_proj'):
+                v_reshape = tf.reshape(v,[int(bz*k),int(hid)])
+                v_proj,regularizers1 = self.fc(v_reshape,num_hid,activation_fn=tf.nn.relu)
+                v_proj = tf.reshape(v_proj,[int(bz),int(k),num_hid])
+                self.regularizers += regularizers1
+                # print('v_proj1 shape:',v_proj.get_shape())
+
+            with tf.variable_scope('q_proj'):
+                q_ , regularizers2 = self.fc(q,num_hid,activation_fn=tf.nn.relu)
+                self.regularizers += regularizers2
+                # print('q_ shape:',q_.get_shape())
+                if self.is_training:
+                    q_ = tf.nn.dropout(q_,self.ph_dropout)
+                q_proj = tf.expand_dims(q_,2)
+                # print('q_proj shape:',q_proj.get_shape())
+
+            v_proj = (v_proj * self.h_mat)
+            # print('v_proj2 shape:',v_proj.get_shape())
+            logits = tf.matmul(v_proj, q_proj) + self.h_bias #[batch, k, 1]
+            # print('logits shape:',logits.get_shape())
+
+            return v * logits
 
     def build_loss(self, lamda, mu, reg_weight):
         """Adds to the inference model the layers required to generate loss."""
@@ -101,39 +137,25 @@ class MLNet(lib.mlnet.MLNet):
                 with tf.control_dependencies([op_averages]):
                     self.loss_average = tf.identity(averages.average(self.loss), name='control')
 
+    def weight_variable(self, shape, regularize, name='weights'):
+        initializer = tf.contrib.layers.xavier_initializer()
+        regularizers = []
 
-class BilinearAttentionLayer(nn.Module):
-    def __init__(self, v_dim, q_dim, num_hid, dropout=0.2):
-        super(BilinearAttentionLayer, self).__init__()
+        var = tf.get_variable(name, shape, tf.float32, initializer=initializer)
+        if regularize:
+            regularizers.append(tf.nn.l2_loss(var))
+            # tf.summary.histogram(var.op.name, var)
+        return var, regularizers
 
-        self.v_proj = FCNet([v_dim, num_hid], dropout)
-        self.q_proj = FCNet([q_dim, num_hid], dropout)
-        self.h_mat = nn.Parameter(torch.Tensor(1, 1, num_hid).normal_())
-        self.h_bias = nn.Parameter(torch.Tensor(1, 1, 1).normal_())
+    def bias_variable(self, shape, regularize, name='bias'):
+        initial = tf.constant_initializer(0.0)
+        regularizers = []
 
-    def forward(self, v, q, prev_logits=None):
-        """
-        v: [batch, k, vdim]
-        q: [batch, qdim]
-        """
-        if prev_logits is None:
-            logits = self.logits(v, q) #[batch, k, 1]
-        else:
-            logits = self.logits(v, q) + prev_logits
-        w = nn.functional.softmax(logits, 1) #[batch, k, 1]
-        v = w * v  #[batch, k, vdim]
-        return v, logits, w
-
-    def logits(self, v, q):
-        batch, k, _ = v.size()
-        v_proj = self.v_proj(v) # [batch, k, num_hid]
-        q_proj = self.q_proj(q).unsqueeze(1).transpose(1, 2)# [batch, num_hid, 1]
-        v_proj = v_proj * self.h_mat
-        logits = torch.matmul(v_proj, q_proj) + self.h_bias #[batch, k, 1]
-        return logits
-
-
-
+        var = tf.get_variable(name, shape, tf.float32, initializer=initial)
+        if regularize:
+            regularizers.append(tf.nn.l2_loss(var))
+            # tf.summary.histogram(var.op.name, var)
+        return var, regularizers
 
 
                     

@@ -58,7 +58,7 @@ def get_descs_and_labels(net: MLNet, sess: tf.Session, modal, loader: DataLoader
 
 
 def retrieve(net: MLNet, sess: tf.Session,
-             q_desc, q_label, r_descs, r_labels,
+             q_desc, q_label, r_descs, r_labels,run_type,
              at=100, batch_size=128):
 
     if not net.is_retrieving: raise Exception("should run this in retrieving mode")
@@ -71,6 +71,7 @@ def retrieve(net: MLNet, sess: tf.Session,
     logits = []
     labels = []
 
+
     batch_q_descs = np.repeat(np.expand_dims(q_desc, axis=0), batch_size, axis=0)
     batch_q_labels = np.array([q_label for _ in range(batch_size)], dtype='int32')
 
@@ -78,19 +79,30 @@ def retrieve(net: MLNet, sess: tf.Session,
         batch_r_descs = r_descs[batch * batch_size: (batch + 1) * batch_size]
         batch_r_labels = r_labels[batch * batch_size:(batch + 1) * batch_size]
         batch_labels = np.array(batch_q_labels == batch_r_labels, dtype='int32')
-        feed_dict = {net.ph_desc_1: batch_q_descs, net.ph_desc_2: batch_r_descs}
+        if run_type == 0:
+            feed_dict = {net.ph_desc_1: batch_q_descs, net.ph_desc_2: batch_r_descs}
+        else:
+            feed_dict = {net.ph_desc_2: batch_q_descs, net.ph_desc_1: batch_r_descs}
         batch_logits = net.logits.eval(session=sess, feed_dict=feed_dict)
         logits.append(batch_logits)
         labels.append(batch_labels)
 
     if n_remain > 0:
-        batch_r_descs = np.zeros([batch_size, desc_dims], dtype='float32')
-        batch_r_descs[:n_remain, :] = r_descs[-n_remain:]
+        r_shape = r_descs.shape
+        if len(r_shape)>2:
+            batch_r_descs = np.zeros([batch_size, r_shape[1],r_shape[2]], dtype='float32')
+            batch_r_descs[:n_remain, :,:] = r_descs[-n_remain:]
+        else:
+            batch_r_descs = np.zeros([batch_size, r_shape[1]], dtype='float32')
+            batch_r_descs[:n_remain, :] = r_descs[-n_remain:]
+
         batch_r_labels = np.zeros([batch_size], dtype='int32')
         batch_r_labels[:n_remain] = r_labels[-n_remain:]
         batch_labels = np.array(batch_q_labels == batch_r_labels, dtype='int32')
-
-        feed_dict = {net.ph_desc_1: batch_q_descs, net.ph_desc_2: batch_r_descs}
+        if run_type == 0:
+            feed_dict = {net.ph_desc_1: batch_q_descs, net.ph_desc_2: batch_r_descs}
+        else:
+            feed_dict = {net.ph_desc_2: batch_q_descs, net.ph_desc_1: batch_r_descs}
         batch_logits = net.logits.eval(session=sess, feed_dict=feed_dict)
         logits.append(batch_logits[:n_remain])
         labels.append(batch_labels[:n_remain])
@@ -117,7 +129,7 @@ def retrieve(net: MLNet, sess: tf.Session,
     return indices[:at], average_precision
 
 def average_precisions(net: MLNet, sess: tf.Session,
-                       q_descs, q_labels, r_descs, r_labels,
+                       q_descs, q_labels, r_descs, r_labels,run_type,
                        at=100, batch_size=128):
 
     """
@@ -133,16 +145,27 @@ def average_precisions(net: MLNet, sess: tf.Session,
     """
 
     n_samples, n_entries = len(q_descs), len(r_descs)
-
-    APs = []
-
+    query_now = ['txt','img']
+    APs,ap_all = [],0
+    time1 = time.time()
     for query_idx in range(n_samples):
-        time1 = time.time()
-        _, average_precision = retrieve(net, sess, q_descs[query_idx], q_labels[query_idx], r_descs, r_labels, at=at, batch_size=batch_size)
+        _, average_precision = retrieve(net, sess, q_descs[query_idx], q_labels[query_idx], r_descs, r_labels, run_type,at=at, batch_size=batch_size)
         APs.append(average_precision)
+        ap_all += average_precision
         time2 = time.time()
-        ellapsed = time2 - time1
-        print("sample %4d/%4d, AP: %5.3f, time: %5.2fs" %
-                 (query_idx + 1, n_samples, average_precision, ellapsed), end='\r')
-
+        rest_h = trans_time((((time2 - time1)/(query_idx+1))* (n_samples - query_idx)))
+        # ellapsed = time2 - time1
+        print("%s ,sample %4d/%4d, AP: %5.3f, Avg: %5.3f, need time: %02d:%02d:%02d" %
+                 (query_now[run_type],query_idx + 1, n_samples, average_precision,ap_all/len(APs), rest_h[0],rest_h[1],rest_h[2]), end='\r')
+    
+    cost_time = trans_time(time2-time1)
+    
+    print("%s ,sample %4d/%4d, AP: %5.3f, Avg: %5.3f, cost time: %02d:%02d:%02d" %
+                 (query_now[run_type],query_idx + 1, n_samples, average_precision,ap_all/len(APs), cost_time[0],cost_time[1],cost_time[2]), end='\r')
     return APs
+
+
+def trans_time(seconds):
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return [h,m,s]

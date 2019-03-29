@@ -17,7 +17,7 @@ class DataLoader:
         if tp == 0:
             self.g_data = self.hdf.get("data")
         else:
-            self.g_data = self.hdf.get("data").get("v_objs")
+            self.g_data = self.hdf.get("data")
             
         self.g_splits = self.hdf.get("splits")
         self.ds_labels = self.hdf.get("labels")

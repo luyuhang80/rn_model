@@ -7,7 +7,7 @@ import time
 import os
 import tensorflow as tf
 import argparse
-os.environ["CUDA_VISIBLE_DEVICES"] = '0,1,2'
+#os.environ["CUDA_VISIBLE_DEVICES"] = '0,1,2'
 # parse arguments
 
 parser = argparse.ArgumentParser()
@@ -25,7 +25,7 @@ args = parser.parse_args()
 
 sess_name = args.sess if args.sess else 'yul_rn%d' % int(time.time())
 ckpt_name = args.ckpt if args.sess else None
-n_epochs = args.epochs if args.epochs else 25
+n_epochs = args.epochs if args.epochs else 50
 batch_size = int(args.bsize) if args.bsize else 256
 label_start_with_zero = False if args.lswone else True
 
@@ -35,9 +35,9 @@ metrics_device = parse_device_str(args.mtrdevice) if args.mtrdevice else None
 
 # initialize data loader
 
-text_h5_path = "/home1/yul/yzq/data/cmplaces/text_bow_unified.h5"
-image_h5_path = "/home1/yul/yzq/data/cmplaces/natural50k_onr.h5"
-adjmat_path = '/home1/yul/yzq/data/cmplaces/txt_graph_knn_unified.txt'
+text_h5_path = "/data1/yjgroup/yzq/data/cmplaces/text_bow_unified.h5"
+image_h5_path = "/data1/yjgroup/yzq/data/cmplaces/natural50k_onr.h5"
+adjmat_path = '/data1/yjgroup/yzq/data/cmplaces/txt_graph_knn_unified.txt'
 
 n_classes = 205
 label_start_with_zero = True
@@ -70,7 +70,7 @@ net.build_train(learning_rate, decay_rate, decay_steps)
 # start training
 
 eval_freq = 400
-dropout = 0.6
+dropout = 0.8
 out_dir = os.path.join('..', '..', 'out', sess_name)
 
 log_dir = os.path.join(out_dir, 'log')

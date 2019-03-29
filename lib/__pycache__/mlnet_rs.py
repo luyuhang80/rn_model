@@ -30,7 +30,8 @@ class MLNet(lib.mlnet.MLNet):
         with tf.variable_scope('modal_2'), tf.device(modal_2_device):
             self.ph2, self.modal_2 = self.build_modal_2()
             _, F_m2 = self.modal_2.get_shape()
-            self.descriptors_2 = self.modal_2
+            self.descriptors_2 = self.BilinearAttentionLayer(self.modal_1,self.modal_2)
+            # self.descriptors_2 = self.modal_2
 
         desc_1 = self.ph_desc_1 if self.is_retrieving else self.descriptors_1
         desc_2 = self.ph_desc_2 if self.is_retrieving else self.descriptors_2
@@ -46,6 +47,16 @@ class MLNet(lib.mlnet.MLNet):
                 self.logits = tf.squeeze(x)
 
         self.build_saver()
+        
+    def BilinearAttentionLayer(self,q,v):
+        num_hid = 512
+        self.h_mat = self.add_weight(name='h_mat',shape=([1,1,self.num_hid]),initializer='normal',trainable=True)
+        self.h_bias = self.add_weight(name='h_bias',shape=([1,1,1]),initializer='normal',trainable=True)
+        v_proj = self.fc(v,num_hid,activation_fn='relu')
+        q_proj = tf.tranpose(tf.expand_dims(tf.nn.dropout(self.fc(q,num_hid,activation_fn='relu'),self.ph_dropout),1),[0,2,1])
+        v_proj = (v_proj * self.h_mat)
+        logits = tf.matmul(v_proj, q_proj) + self.h_bias #[batch, k, 1]
+        return v * logits
 
     def build_loss(self, lamda, mu, reg_weight):
         """Adds to the inference model the layers required to generate loss."""
@@ -89,3 +100,40 @@ class MLNet(lib.mlnet.MLNet):
                 tf.summary.scalar('total', averages.average(self.loss))
                 with tf.control_dependencies([op_averages]):
                     self.loss_average = tf.identity(averages.average(self.loss), name='control')
+
+
+class BilinearAttentionLayer(nn.Module):
+    def __init__(self, v_dim, q_dim, num_hid, dropout=0.2):
+        super(BilinearAttentionLayer, self).__init__()
+
+        self.v_proj = FCNet([v_dim, num_hid], dropout)
+        self.q_proj = FCNet([q_dim, num_hid], dropout)
+        self.h_mat = nn.Parameter(torch.Tensor(1, 1, num_hid).normal_())
+        self.h_bias = nn.Parameter(torch.Tensor(1, 1, 1).normal_())
+
+    def forward(self, v, q, prev_logits=None):
+        """
+        v: [batch, k, vdim]
+        q: [batch, qdim]
+        """
+        if prev_logits is None:
+            logits = self.logits(v, q) #[batch, k, 1]
+        else:
+            logits = self.logits(v, q) + prev_logits
+        w = nn.functional.softmax(logits, 1) #[batch, k, 1]
+        v = w * v  #[batch, k, vdim]
+        return v, logits, w
+
+    def logits(self, v, q):
+        batch, k, _ = v.size()
+        v_proj = self.v_proj(v) # [batch, k, num_hid]
+        q_proj = self.q_proj(q).unsqueeze(1).transpose(1, 2)# [batch, num_hid, 1]
+        v_proj = v_proj * self.h_mat
+        logits = torch.matmul(v_proj, q_proj) + self.h_bias #[batch, k, 1]
+        return logits
+
+
+
+
+
+                    
